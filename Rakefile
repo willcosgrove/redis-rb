@@ -24,7 +24,17 @@ task :start do
     false
   end
 
-  system "redis-server #{REDIS_CNF}" unless redis_running
+  unless redis_running
+    unless system("which redis-server")
+      STDERR.puts "redis-server not in PATH"
+      exit 1
+    end
+
+    unless system("redis-server #{REDIS_CNF}")
+      STDERR.puts "could not start redis-server"
+      exit 1
+    end
+  end
 end
 
 desc "Stop the Redis server"
@@ -35,62 +45,12 @@ task :stop do
   end
 end
 
-def isolated(&block)
-  pid = fork { yield }
-  Process.wait(pid)
-end
+task :test do
+  require "cutest"
 
-desc "Run the test suite"
-task :test => ["test:ruby", "test:hiredis", "test:synchrony"]
-
-namespace :test do
-  desc "Run tests against the Ruby driver"
-  task :ruby do
-    require "cutest"
-
-    isolated do
-      Cutest.run(Dir["./test/**/*_test.rb"])
-    end
-  end
-
-  desc "Run tests against the hiredis driver"
-  task :hiredis do
-    require "cutest"
-
-    isolated do
-      begin
-        require "redis/connection/hiredis"
-
-        puts
-        puts "Running tests against hiredis v#{Hiredis::VERSION}"
-
-        Cutest.run(Dir["./test/**/*_test.rb"])
-      rescue LoadError
-        puts "Skipping tests against hiredis"
-      end
-    end
-  end
-
-  desc "Run tests against the em-synchrony driver"
-  task :synchrony do
-    require "cutest"
-
-    # Synchrony needs 1.9
-    next if RUBY_VERSION < "1.9"
-
-    isolated do
-      begin
-        require "redis/connection/synchrony"
-
-        puts
-        puts "Running tests against em-synchrony"
-
-        threaded_tests = ['./test/thread_safety_test.rb']
-        Cutest.run(Dir['./test/**/*_test.rb'] - threaded_tests)
-      rescue LoadError
-        puts "Skipping tests against em-synchrony"
-      end
-    end
+  files = Dir["./test/**/*_test.rb"]
+  files.each do |file|
+    Cutest.run_file(file)
   end
 end
 
