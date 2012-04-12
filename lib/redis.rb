@@ -1,5 +1,6 @@
 require "monitor"
 require "redis/errors"
+require "uri"
 
 class Redis
 
@@ -10,23 +11,6 @@ class Redis
   attr :client
 
   def self.connect(options = {})
-    options = options.dup
-
-    url = options.delete(:url) || ENV["REDIS_URL"]
-    if url
-      require "uri"
-
-      uri = URI(url)
-
-      # Require the URL to have at least a host
-      raise ArgumentError, "invalid url" unless uri.host
-
-      options[:host]     ||= uri.host
-      options[:port]     ||= uri.port
-      options[:password] ||= uri.password
-      options[:db]       ||= uri.path[1..-1].to_i
-    end
-
     new(options)
   end
 
@@ -41,7 +25,7 @@ class Redis
   include MonitorMixin
 
   def initialize(options = {})
-    @client = Client.new(options)
+    @client = Client.new(_normalize_options(options))
 
     super() # Monitor#initialize
   end
@@ -256,17 +240,7 @@ class Redis
   # @return [Hash<String, String>]
   def hgetall(key)
     synchronize do |client|
-      client.call [:hgetall, key] do |reply|
-        if reply.kind_of?(Array)
-          hash = Hash.new
-          reply.each_slice(2) do |field, value|
-            hash[field] = value
-          end
-          hash
-        else
-          reply
-        end
-      end
+      client.call [:hgetall, key], &_hashify
     end
   end
 
@@ -335,6 +309,17 @@ class Redis
     synchronize do |client|
       client.call [:echo, value]
     end
+  end
+
+  # Returns the current server time as a two items lists: an UNIX timestamp
+  # and the amount of microseconds already elapsed in the current second.
+  #
+  # Example:
+  #   r.time # => [ "1333093196", "606806" ]
+  #
+  # Returns [Array] UNIX timestamp and elapsed microseconds in the current second.
+  def time
+    @client.call [:time]
   end
 
   # Ping the server.
@@ -1280,6 +1265,17 @@ class Redis
     end
   end
 
+  # Set a key's time to live in milliseconds.
+  #
+  # @param [String] key
+  # @param [Fixnum] milliseconds time to live
+  # @return [Boolean] whether the timeout was set or not
+  def pexpire(key, milliseconds)
+    synchronize do |client|
+      client.call [:pexpire, key, milliseconds], &_boolify
+    end
+  end
+
   # Remove the expiration from a key.
   #
   # @param [String] key
@@ -1290,7 +1286,7 @@ class Redis
     end
   end
 
-  # Get the time to live for a key.
+  # Get the time to live (in seconds) for a key.
   #
   # @param [String] key
   # @return [Fixnum] remaining time to live in seconds, or -1 if the
@@ -1298,6 +1294,17 @@ class Redis
   def ttl(key)
     synchronize do |client|
       client.call [:ttl, key]
+    end
+  end
+
+  # Get the time to live (in milliseconds) for a key.
+  #
+  # @param [String] key
+  # @return [Fixnum] remaining time to live in milliseconds, or -1 if the
+  #   key does not exist or does not have a timeout
+  def pttl(key)
+    synchronize do |client|
+      client.call [:pttl, key]
     end
   end
 
@@ -1312,6 +1319,16 @@ class Redis
     end
   end
 
+  # Set the expiration for a key as number of milliseconds from UNIX Epoch.
+  #
+  # @param [String] key
+  # @param [Fixnum] ms_unix_time expiry time specified as number of milliseconds from UNIX Epoch.
+  # @return [Boolean] whether the timeout was set or not
+  def pexpireat(key, ms_unix_time)
+    synchronize do |client|
+      client.call [:pexpireat, key, ms_unix_time], &_boolify
+    end
+  end
   # Set the string value of a hash field.
   #
   # @param [String] key
@@ -1430,7 +1447,7 @@ class Redis
     end
   end
 
-  # Increment the integer value of a hash field by the given number.
+  # Increment the integer value of a hash field by the given integer number.
   #
   # @param [String] key
   # @param [String] field
@@ -1439,6 +1456,20 @@ class Redis
   def hincrby(key, field, increment)
     synchronize do |client|
       client.call [:hincrby, key, field, increment]
+    end
+  end
+
+  # Increment the numeric value of a hash field by the given float number.
+  #
+  # @param [String] key
+  # @param [String] field
+  # @param [Float] increment
+  # @return [Float] value of the field after incrementing it
+  def hincrbyfloat(key, field, increment)
+    synchronize do |client|
+      client.call [:hincrbyfloat, key, field, increment] do |reply|
+        Float(reply) if reply
+      end
     end
   end
 
@@ -1509,7 +1540,7 @@ class Redis
     end
   end
 
-  # Set the value and expiration of a key.
+  # Set the time to live in seconds of a key.
   #
   # @param [String] key
   # @param [Fixnum] ttl
@@ -1518,6 +1549,18 @@ class Redis
   def setex(key, ttl, value)
     synchronize do |client|
       client.call [:setex, key, ttl, value]
+    end
+  end
+
+  # Set the time to live in milliseconds of a key.
+  #
+  # @param [String] key
+  # @param [Fixnum] ttl
+  # @param [String] value
+  # @return `"OK"`
+  def psetex(key, ttl, value)
+    synchronize do |client|
+      client.call [:psetex, key, ttl, value]
     end
   end
 
@@ -1687,7 +1730,7 @@ class Redis
     end
   end
 
-  # Increment the integer value of a key by the given number.
+  # Increment the integer value of a key by the given integer number.
   #
   # @example
   #   redis.incrby("value", 5)
@@ -1699,6 +1742,23 @@ class Redis
   def incrby(key, increment)
     synchronize do |client|
       client.call [:incrby, key, increment]
+    end
+  end
+
+  # Increment the numeric value of a key by the given float number.
+  #
+  # @example
+  #   redis.incrbyfloat("value", 1.23)
+  #     # => 1.23
+  #
+  # @param [String] key
+  # @param [Float] increment
+  # @return [Float] value after incrementing it
+  def incrbyfloat(key, increment)
+    synchronize do |client|
+      client.call [:incrbyfloat, key, increment] do |reply|
+        Float(reply) if reply
+      end
     end
   end
 
@@ -1780,7 +1840,7 @@ class Redis
     synchronize do |client|
       begin
         original, @client = @client, Pipeline.new
-        yield
+        yield(self)
         original.call_pipeline(@client)
       ensure
         @client = original
@@ -1922,14 +1982,14 @@ class Redis
   # Listen for messages published to the given channels.
   def subscribe(*channels, &block)
     synchronize do |client|
-      subscription(:subscribe, channels, block)
+      _subscription(:subscribe, channels, block)
     end
   end
 
   # Listen for messages published to channels matching the given patterns.
   def psubscribe(*channels, &block)
     synchronize do |client|
-      subscription(:psubscribe, channels, block)
+      _subscription(:psubscribe, channels, block)
     end
   end
 
@@ -1962,7 +2022,17 @@ private
     }
   end
 
-  def subscription(method, channels, block)
+  def _hashify
+    lambda { |array|
+      hash = Hash.new
+      array.each_slice(2) do |field, value|
+        hash[field] = value
+      end
+      hash
+    }
+  end
+
+  def _subscription(method, channels, block)
     return @client.call [method, *channels] if subscribed?
 
     begin
@@ -1971,6 +2041,25 @@ private
     ensure
       @client = original
     end
+  end
+
+  def _normalize_options(options)
+    options = options.dup
+
+    if options.include?(:path)
+      uri = URI.parse("unix://#{options.delete(:path)}")
+    else
+      uri = URI.parse(options.delete(:url) || ENV["REDIS_URL"] || "redis://127.0.0.1:6379/0")
+
+      uri.host     = options.delete(:host)           if options.include?(:host)
+      uri.port     = options.delete(:port)           if options.include?(:port)
+      uri.userinfo = ":#{options.delete(:password)}" if options.include?(:password)
+      uri.path     = "/#{options.delete(:db)}"       if options.include?(:db)
+    end
+
+    options[:uri] = uri
+
+    options
   end
 
 end

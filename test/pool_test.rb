@@ -2,7 +2,9 @@ require File.expand_path("./helper", File.dirname(__FILE__))
 require "redis/pool"
 
 setup do
-  init Redis::Pool.new(OPTIONS.merge(:size => 10))
+  url = "redis://127.0.0.1:#{OPTIONS[:port]}/#{OPTIONS[:db]}"
+
+  init Redis::Pool.new(:uri => URI(url), :size => 10)
 end
 
 test "Connection pool" do |r|
