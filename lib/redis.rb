@@ -3043,18 +3043,36 @@ class Redis
 
   # Trims older entries of the stream if needed.
   #
-  # @example Without options
-  #   redis.xtrim('mystream', 1000)
-  # @example With options
-  #   redis.xtrim('mystream', 1000, approximate: true)
+  # @example With maxlen
+  #   redis.xtrim('mystream', maxlen: 1000)
+  # @example With approximate trimming
+  #   redis.xtrim('mystream', maxlen: 1000, approximate: true)
+  # @example With minid
+  #   redis.xtrim('mystream', minid: "1624553650985-1")
+  # @example With minid approximate trimming
+  #   redis.xtrim('mystream', minid: "1624553650985-1". approximate: true)
   #
   # @param key         [String]  the stream key
-  # @param mexlen      [Integer] max length of entries
-  # @param approximate [Boolean] whether to add `~` modifier of maxlen or not
+  # @param maxlen      [Integer] max length of entries
+  # @param minid       [String]  minimum id to keep
+  # @param approximate [Boolean] whether to add `~` modifier or not
+  # @param limit       [Integer] limit of how many entries to trim
   #
   # @return [Integer] the number of entries actually deleted
-  def xtrim(key, maxlen, approximate: false)
-    args = [:xtrim, key, 'MAXLEN', (approximate ? '~' : nil), maxlen].compact
+  def xtrim(key, maxlen: nil, minid: nil, limit: nil, approximate: !!limit)
+    if minid
+      args = [:xtrim, key, 'MINID', (approximate ? '~' : nil), minid].compact
+    elsif maxlen
+      args = [:xtrim, key, 'MAXLEN', (approximate ? '~' : nil), maxlen].compact
+    else
+      raise ArgumentError, "must supply either minid or maxlen options"
+    end
+
+    if limit
+      args << "LIMIT"
+      args << limit
+    end
+
     synchronize { |client| client.call(args) }
   end
 
